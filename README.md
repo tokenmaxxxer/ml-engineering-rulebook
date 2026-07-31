@@ -12,7 +12,14 @@ generated as skeleton scaffolding by issue-170.
 
 ## Install
 
+Requires `tokenmaxxxer-core` (contract v3 protocol machinery) and
+`warrant` (rotating-stance hunt agent), both from the `tokenmaxxxer-core`
+marketplace:
+
 ```
+claude plugin marketplace add tokenmaxxxer/tokenmaxxxer-core
+claude plugin install core@tokenmaxxxer-core
+claude plugin install warrant@tokenmaxxxer-core
 claude plugin marketplace add tokenmaxxxer/ml-engineering-rulebook
 claude plugin install ml-engineering
 ```
@@ -20,13 +27,15 @@ claude plugin install ml-engineering
 ## Layout
 
 - `ml-engineering/.claude-plugin/plugin.json` — plugin manifest
-- `ml-engineering/hooks/hooks.json` — SessionStart + PreToolUse wiring
-- `ml-engineering/hooks/directive.sh` — SessionStart role directive
-- `ml-engineering/hooks/record-fields-gate.sh` — this role's record required-field gate
-- `ml-engineering/hooks/trailer-gate.sh` — commit `Subject: issue-<n>` trailer gate
-- `ml-engineering/hooks/handbook-trigger-gate.sh` — s21 handbook-sync gate
-- `ml-engineering/agents/warrant-hunter.md` — rotating-stance hunt agent
+- `ml-engineering/hooks/hooks.json` — SessionStart wiring (directive.sh only;
+  the role-agnostic gates — trailer/record-fields/handbook-trigger — are
+  registered globally by `core`, not vendored here)
+- `ml-engineering/hooks/directive.sh` — SessionStart role directive, a stub
+  over `core/hooks/lib/role-directive.sh`'s shared boilerplate
 - `docs/specs/approvers.md` — Approve-authority allowlist (see below)
+
+The rotating-stance hunt agent (formerly `ml-engineering/agents/warrant-hunter.md`)
+is now `warrant@tokenmaxxxer-core` — install it alongside `core` above.
 
 This is scaffolding, not a finished rulebook: fill in doctrine detail,
 handoff enforcement, and any role-specific progress gate before treating
