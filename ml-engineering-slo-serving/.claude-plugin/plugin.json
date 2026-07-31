@@ -1,0 +1,7 @@
+{
+  "name": "ml-engineering-slo-serving",
+  "description": "ml-engineering phase-2 serving-design methodology gate: requires serving pattern, service+model-behavior SLOs, staged rollout, and rollback conditions on docs/issue-<n>/reports/ml-engineering.md writes.",
+  "author": {
+    "name": "Jung Jiwon & Lee Jongkwan"
+  }
+}

@@ -1,0 +1,7 @@
+{
+  "name": "ml-engineering-model-provenance",
+  "description": "ml-engineering phase-2 model-provenance gate (Mitchell et al. 2019 model cards + Sculley et al. 2015 versioning): requires model-card fields and data/model version identifiers on docs/issue-<n>/reports/ml-engineering.md writes.",
+  "author": {
+    "name": "Jung Jiwon & Lee Jongkwan"
+  }
+}
