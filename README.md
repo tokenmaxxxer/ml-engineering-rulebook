@@ -6,7 +6,9 @@ generated as skeleton scaffolding by issue-170.
 
 - **decides**: 모델을 서비스로 안정적으로 서빙 가능한가
 - **use_when**: 모델 서빙 표면이 걸릴 때
-- **produces**: serving design, risk note (drift/latency/failure mode)
+- **produces**: serving design (serving pattern, service SLO, model-behavior SLO,
+  staged rollout + promotion/rollback criteria), risk note (drift/latency/failure-mode,
+  each scored pass/fail — see `docs/specs/record-norms.md`)
 - **write_scope**: []
 - **hand-off**: 학습 데이터 파이프라인이면 → data-engineering
 
@@ -33,6 +35,9 @@ claude plugin install ml-engineering
 - `ml-engineering/hooks/directive.sh` — SessionStart role directive, a stub
   over `core/hooks/lib/role-directive.sh`'s shared boilerplate
 - `docs/specs/approvers.md` — Approve-authority allowlist (see below)
+- `docs/specs/record-norms.md` — phase-1 proposal norm (ADR shape) and
+  phase-2 output norm (serving design / risk note required components),
+  per issue-1
 
 The rotating-stance hunt agent (formerly `ml-engineering/agents/warrant-hunter.md`)
 is now `warrant@tokenmaxxxer-core` — install it alongside `core` above.
