@@ -8,6 +8,31 @@
       "name": "ml-engineering",
       "source": "./ml-engineering",
       "description": "The ml-engineering role on contract v3 (issue-160 round-3 promotion). Decides: 모델을 서비스로 안정적으로 서빙 가능한가."
+    },
+    {
+      "name": "ml-engineering-adr-proposal",
+      "source": "./ml-engineering-adr-proposal",
+      "description": "ml-engineering phase-1 ADR-proposal methodology gate: ADR section markers, a named source, and an explicit rejected-alternative statement."
+    },
+    {
+      "name": "ml-engineering-slo-serving",
+      "source": "./ml-engineering-slo-serving",
+      "description": "ml-engineering phase-2 serving-design methodology gate: serving pattern, service+model-behavior SLOs, staged rollout, rollback conditions."
+    },
+    {
+      "name": "ml-engineering-ml-test-score",
+      "source": "./ml-engineering-ml-test-score",
+      "description": "ml-engineering phase-2 ML Test Score methodology gate (Breck et al. 2017): Data/Model/Infrastructure/Monitoring Tests, each scored."
+    },
+    {
+      "name": "ml-engineering-model-provenance",
+      "source": "./ml-engineering-model-provenance",
+      "description": "ml-engineering phase-2 model-provenance methodology gate: model card (Mitchell et al. 2019) plus data/model version identifiers."
+    },
+    {
+      "name": "ml-engineering-eval-discipline",
+      "source": "./ml-engineering-eval-discipline",
+      "description": "ml-engineering phase-2 evaluation-discipline methodology gate: distinct, both-required offline and online evaluation subsections."
     }
   ]
 }

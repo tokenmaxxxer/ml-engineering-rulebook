@@ -1,0 +1,7 @@
+{
+  "name": "ml-engineering-eval-discipline",
+  "description": "ml-engineering phase-2 evaluation-discipline gate (Zinkevich, Rules of ML): requires distinct, both-required offline and online evaluation subsections on docs/issue-<n>/reports/ml-engineering.md writes.",
+  "author": {
+    "name": "Jung Jiwon & Lee Jongkwan"
+  }
+}

@@ -1,0 +1,7 @@
+{
+  "name": "ml-engineering-ml-test-score",
+  "description": "ml-engineering phase-2 ML Test Score gate (Breck et al. 2017): requires all four scored rubric sections — Data Tests, Model Tests, ML Infrastructure Tests, Monitoring Tests — on docs/issue-<n>/reports/ml-engineering.md writes.",
+  "author": {
+    "name": "Jung Jiwon & Lee Jongkwan"
+  }
+}

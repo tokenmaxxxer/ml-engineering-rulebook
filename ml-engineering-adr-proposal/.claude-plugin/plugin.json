@@ -1,0 +1,7 @@
+{
+  "name": "ml-engineering-adr-proposal",
+  "description": "ml-engineering phase-1 ADR-proposal methodology gate: requires ADR section markers, at least one sourced claim, and an explicit rejected-alternative statement on docs/issue-<n>/proposals/*ml-engineering*.md writes.",
+  "author": {
+    "name": "Jung Jiwon & Lee Jongkwan"
+  }
+}
