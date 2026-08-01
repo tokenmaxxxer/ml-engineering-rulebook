@@ -1,60 +1,213 @@
 #!/usr/bin/env bash
+# Standalone tests for the ml-engineering-adr-proposal PreToolUse gate.
+# Covers the gate-house standard's mandatory categories (issue-10): Edit
+# with replace_all, MultiEdit with mixed replace_all, malformed JSON,
+# kill-switch garbage value, absolute/./-prefixed path matching, plus this
+# gate's own section-placement regression (named source / rejected
+# alternative scoped to Context/Rationale/Consequences, not anywhere).
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 GATE="$HERE/../hooks/methodology-gate.sh"
+# CLAUDE_PLUGIN_ROOT_CORE must resolve to an installed core plugin's root
+# (gate-lib.sh lives at $CLAUDE_PLUGIN_ROOT_CORE/hooks/lib/gate-lib.sh) for
+# these tests to run at all — the gate sources it by reference, per
+# docs/handbooks/gate-house-standard.md. Set it in the invoking shell/CI
+# before running this file; it is intentionally not defaulted here.
+GATE_OFF_VAR="ML_ENGINEERING_ADR_PROPOSAL_GATE_OFF"
+TARGET_REL="docs/issue-7/proposals/x-ml-engineering.md"
 pass=0; fail=0
+report() { if [ "$2" = "$1" ]; then pass=$((pass+1)); printf 'ok     %-28s %s\n' "$3" "$2"; else fail=$((fail+1)); printf 'FAIL   %-28s want=%s got=%s\n' "$3" "$1" "$2"; fi; }
 
-report() { # want got name
-  if [ "$2" = "$1" ]; then pass=$((pass+1)); printf 'ok     %-20s want=%s got=%s\n' "$3" "$1" "$2"; else fail=$((fail+1)); printf 'FAIL   %-20s want=%s got=%s\n' "$3" "$1" "$2"; fi
+new_td() { td="$(cd "$(mktemp -d)" && pwd -P)"; git init -q "$td"; }
+
+_mk_write_payload() { # file_path content cwd
+python3 - "$1" "$2" "$3" <<'PY'
+import json,sys
+fp,content,cwd=sys.argv[1],sys.argv[2],sys.argv[3]
+print(json.dumps({"tool_name":"Write","tool_input":{"file_path":fp,"content":content},"cwd":cwd}))
+PY
 }
 
-run_case() { # name want content
-  name="$1"; want="$2"; content="$3"
-  td="$(mktemp -d)"
-  ( cd "$td" && git init -q ) >/dev/null 2>&1
-  payload="$(python3 -c '
-import json, sys
-content = sys.argv[1]
-cwd = sys.argv[2]
-payload = {
-    "tool_name": "Write",
-    "tool_input": {
-        "file_path": "docs/issue-7/proposals/x-ml-engineering.md",
-        "content": content,
-    },
-    "cwd": cwd,
+_mk_edit_payload() { # file_path old new replace_all(true/false/"") cwd
+python3 - "$1" "$2" "$3" "$4" "$5" <<'PY'
+import json,sys
+fp,old,new,ra,cwd=sys.argv[1:6]
+ti={"file_path":fp,"old_string":old,"new_string":new}
+if ra: ti["replace_all"]=(ra=="true")
+print(json.dumps({"tool_name":"Edit","tool_input":ti,"cwd":cwd}))
+PY
 }
-print(json.dumps(payload))
-' "$content" "$td")"
-  printf '%s' "$payload" | env CLAUDE_PROJECT_DIR="$td" bash "$GATE" >/dev/null 2>&1
+
+_mk_multiedit_payload() { # file_path cwd edits_json
+python3 - "$1" "$2" "$3" <<'PY'
+import json,sys
+fp,cwd,edits_json=sys.argv[1:4]
+edits=json.loads(edits_json)
+print(json.dumps({"tool_name":"MultiEdit","tool_input":{"file_path":fp,"edits":edits},"cwd":cwd}))
+PY
+}
+
+_fire() { # payload td extra_env(optional)
+  local payload="$1" tdd="$2" extra="${3:-}"
+  printf '%s' "$payload" | env CLAUDE_PROJECT_DIR="$tdd" $extra bash "$GATE" >/dev/null 2>&1
+  rc=$?
+}
+
+run_write() { # want name content [extra_env]
+  local want="$1" name="$2" content="$3" extra="${4:-}"
+  new_td
+  local payload; payload="$(_mk_write_payload "$TARGET_REL" "$content" "$td")"
+  _fire "$payload" "$td" "$extra"
+  case "$rc" in 0) got=allow ;; 2) got=deny ;; *) got="exit-$rc" ;; esac
+  rm -rf "$td"
+  report "$want" "$got" "$name"
+}
+
+run_write_abs() { # want name content path_kind(abs|dotslash)
+  local want="$1" name="$2" content="$3" kind="$4"
+  new_td
+  local path
+  case "$kind" in
+    abs) path="$td/$TARGET_REL" ;;
+    dotslash) path="./$TARGET_REL" ;;
+  esac
+  local payload; payload="$(_mk_write_payload "$path" "$content" "$td")"
+  _fire "$payload" "$td"
+  case "$rc" in 0) got=allow ;; 2) got=deny ;; *) got="exit-$rc" ;; esac
+  rm -rf "$td"
+  report "$want" "$got" "$name"
+}
+
+run_edit() { # want name current old new replace_all
+  local want="$1" name="$2" current="$3" old="$4" new="$5" ra="$6"
+  new_td
+  mkdir -p "$td/$(dirname "$TARGET_REL")"
+  printf '%s' "$current" > "$td/$TARGET_REL"
+  local payload; payload="$(_mk_edit_payload "$TARGET_REL" "$old" "$new" "$ra" "$td")"
+  _fire "$payload" "$td"
+  case "$rc" in 0) got=allow ;; 2) got=deny ;; *) got="exit-$rc" ;; esac
+  rm -rf "$td"
+  report "$want" "$got" "$name"
+}
+
+run_multiedit() { # want name current edits_json
+  local want="$1" name="$2" current="$3" edits_json="$4"
+  new_td
+  mkdir -p "$td/$(dirname "$TARGET_REL")"
+  printf '%s' "$current" > "$td/$TARGET_REL"
+  local payload; payload="$(_mk_multiedit_payload "$TARGET_REL" "$td" "$edits_json")"
+  _fire "$payload" "$td"
+  case "$rc" in 0) got=allow ;; 2) got=deny ;; *) got="exit-$rc" ;; esac
+  rm -rf "$td"
+  report "$want" "$got" "$name"
+}
+
+run_raw() { # want name raw_payload
+  local want="$1" name="$2" raw="$3"
+  new_td
+  printf '%s' "$raw" | env CLAUDE_PROJECT_DIR="$td" bash "$GATE" >/dev/null 2>&1
   rc=$?
   case "$rc" in 0) got=allow ;; 2) got=deny ;; *) got="exit-$rc" ;; esac
   rm -rf "$td"
   report "$want" "$got" "$name"
 }
 
-PASS_CONTENT='# Context
-Some background here.
-# Decision
-We decided to do X.
-# Rationale
-Because of reasons (Smith 2020).
-# Consequences
-Things will change.
+PASS_CONTENT='## Context
+we need to pick an approach (Smith 2020)
 
-Rejected alternative: approach Y was considered and declined because of cost.'
+## Decision
+adopt approach B
 
-FAIL_CONTENT='# Context
-Some background here.
-# Decision
-We decided to do X.
-# Rationale
-Because of reasons (Smith 2020).
-# Consequences
-Things will change.'
+## Rationale
+source: Smith 2020 justifies this; rejected alternative: approach A, considered and declined because it does not scale
 
-run_case "pass-case" allow "$PASS_CONTENT"
-run_case "fail-case" deny "$FAIL_CONTENT"
+## Consequences
+approach B is now the standard'
 
-echo "== $pass passed, $fail failed =="
+FAIL_CONTENT='## Context
+we need to pick an approach
+
+## Decision
+adopt approach B
+
+## Rationale
+approach B seemed reasonable
+
+## Consequences
+approach B is now the standard'
+
+WRONG_SECTION_CONTENT='## Context
+we need to pick an approach; source: Smith 2020; rejected alternative: approach A
+
+## Decision
+adopt approach B
+
+## Rationale
+approach B seemed reasonable
+
+## Consequences
+approach B is now the standard'
+
+# --- base allow/deny ---
+run_write allow full-adr-with-source-and-rejected "$PASS_CONTENT"
+run_write deny  missing-source-and-rejected        "$FAIL_CONTENT"
+
+# --- section-placement: "rejected alternative" mentioned only in Context, not Rationale/Consequences => deny ---
+run_write deny wrong-section-rejected-alternative "$WRONG_SECTION_CONTENT"
+
+# --- Edit, single occurrence, section-placed correctly => allow ---
+run_edit allow edit-adds-rationale-fields "$FAIL_CONTENT" "approach B seemed reasonable" "source: Smith 2020 justifies this; rejected alternative: approach A, considered and declined because it does not scale" ""
+
+# --- Edit with replace_all: true against a multiply-occurring old_string ---
+CURRENT_MULTI='## Context
+TBD
+
+## Decision
+adopt approach B
+
+## Rationale
+TBD
+
+## Consequences
+approach B is now the standard'
+run_edit allow edit-replace-all-true  "$CURRENT_MULTI" "TBD" "source: Smith 2020; rejected alternative: approach A, considered and declined because it does not scale" "true"
+run_edit deny  edit-replace-all-false "$CURRENT_MULTI" "TBD" "source: Smith 2020; rejected alternative: approach A, considered and declined because it does not scale" "false"
+
+# --- MultiEdit, mixed replace_all true/false per edit, each independently
+#     honored. X_A (single occurrence, in Context) supplies the named
+#     source regardless of its own flag. X_B has a decoy occurrence in
+#     Decision (a scope neither check reads) before the real occurrence in
+#     Consequences — with replace_all:false only the decoy gets fixed,
+#     leaving the rejected-alternative requirement unmet. ---
+CURRENT_MIXED='## Context
+X_A
+
+## Decision
+X_B
+
+## Rationale
+no source or rejected-alternative wording lives here on purpose
+
+## Consequences
+X_B'
+EDITS_MIXED_DENY='[{"old_string":"X_A","new_string":"source: Smith 2020 justifies this","replace_all":true},{"old_string":"X_B","new_string":"rejected alternative: approach A, considered and declined because it does not scale","replace_all":false}]'
+EDITS_MIXED_ALLOW='[{"old_string":"X_A","new_string":"source: Smith 2020 justifies this","replace_all":true},{"old_string":"X_B","new_string":"rejected alternative: approach A, considered and declined because it does not scale","replace_all":true}]'
+run_multiedit deny  multiedit-mixed-false-leaves-consequences-unfixed "$CURRENT_MIXED" "$EDITS_MIXED_DENY"
+run_multiedit allow multiedit-mixed-both-true                         "$CURRENT_MIXED" "$EDITS_MIXED_ALLOW"
+
+# --- malformed JSON: truncated, non-object top-level, empty ---
+run_raw deny malformed-json-truncated '{"tool_name":"Write","tool_input":{"file_path":"docs/issue-7/proposals/x-ml-engineering.md","content":'
+run_raw deny malformed-json-array     '["not", "an", "object"]'
+run_raw deny malformed-json-empty     ''
+
+# --- kill-switch garbage value: gate must stay ACTIVE (still evaluates and denies FAIL_CONTENT) ---
+run_write deny kill-switch-garbage-stays-active "$FAIL_CONTENT" "${GATE_OFF_VAR}=1x"
+
+# --- absolute-path / ./-prefixed matching ---
+run_write_abs allow absolute-path-match "$PASS_CONTENT" abs
+run_write_abs allow dotslash-path-match "$PASS_CONTENT" dotslash
+
+printf '\n== %d passed, %d failed ==\n' "$pass" "$fail"
+[ "$fail" -eq 0 ]
+exit_code=$?
 if [ "$fail" -ne 0 ]; then exit 1; else exit 0; fi

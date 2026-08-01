@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-__fc(){ rc=$?; if [ "$rc" != 0 ] && [ "$rc" != 2 ]; then echo "fail-closed: gate aborted (rc=$rc)" >&2; exit 2; fi; }
-trap __fc EXIT
+. "${CLAUDE_PLUGIN_ROOT_CORE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../core" && pwd -P)}/hooks/lib/gate-lib.sh"
+gate_trap_fail_closed
 # PreToolUse gate (Write|Edit|MultiEdit) — ml-engineering model-provenance gate.
 #
 # Targets: docs/issue-<n>/reports/ml-engineering.md (phase-2 record) — this
@@ -8,22 +8,26 @@ trap __fc EXIT
 #
 # Requires the model-card fields (Mitchell et al. 2019, FAT* '19 — "Model
 # Cards for Model Reporting": intended use, limitations, training data,
-# evaluation data) plus explicit data and model version identifiers
-# (Sculley et al. 2015, NeurIPS — "Hidden Technical Debt in Machine
-# Learning Systems", on the debt incurred by unversioned data/model
-# artifacts) be present in the proposed content. Fails closed when a
-# required element is absent.
+# evaluation data), each anchored to its own heading span (a heading named
+# after the field itself, or an explicit "model card" section) rather than
+# a bare substring anywhere in the document, plus explicit data and model
+# version identifiers (Sculley et al. 2015, NeurIPS — "Hidden Technical
+# Debt in Machine Learning Systems", on the debt incurred by unversioned
+# data/model artifacts). Fails closed when a required element is absent or
+# misplaced.
+#
+# Sources gate-lib.sh/gate-lib.py (docs/handbooks/gate-house-standard.md,
+# issue-72) for the fail-closed trap, kill switch, JSON parsing, path
+# normalization, and Write/Edit/MultiEdit reconstruction — see that file's
+# usage comment for the exact call convention.
 #
 # Kill switch: export ML_ENGINEERING_MODEL_PROVENANCE_GATE_OFF=1
 set -uo pipefail
 
 role="${CLAUDE_ROLE:-ml-engineering}"
-deny() { echo "${role}: refused — $1" >&2; exit 2; }
+deny() { gate_deny "ml-engineering-model-provenance" "$1"; }
 
-case "${ML_ENGINEERING_MODEL_PROVENANCE_GATE_OFF:-}" in
-  ""|0|false|no|off) ;;
-  *) exit 0 ;;
-esac
+gate_kill_switch_active "${ML_ENGINEERING_MODEL_PROVENANCE_GATE_OFF:-}" || { trap - EXIT; exit 0; }
 
 command -v python3 >/dev/null 2>&1 || deny "methodology-gate.sh requires python3, which is not on PATH; denying rather than guessing."
 
@@ -70,18 +74,17 @@ PG_PAYLOAD="$payload" PG_ROOT="$root" \
 python3 <<'PY'
 import sys as _fc_sys  # fail-closed-on-internal-error
 try:
-    import json, os, posixpath, re, sys
+    import importlib.util, json, os, posixpath, re, sys
 
     def deny(m):
         sys.stderr.write("ml-engineering-model-provenance: refused — %s\n" % m); sys.exit(2)
 
+    _spec = importlib.util.spec_from_file_location("gate_lib", os.environ["GATE_LIB_PY"])
+    gate_lib = importlib.util.module_from_spec(_spec)
+    _spec.loader.exec_module(gate_lib)
+
     raw = os.environ.get("PG_PAYLOAD", "")
-    try:
-        ev = json.loads(raw) if raw else {}
-    except ValueError:
-        deny("the tool-call payload is not valid JSON; the gate cannot judge model-provenance fields on an unparseable write.")
-    if not isinstance(ev, dict):
-        deny("the tool-call payload is not a JSON object; failing closed on model-provenance.")
+    ev = gate_lib.gate_parse_json_or_deny(raw, deny)
 
     tool = ev.get("tool_name")
     ti = ev.get("tool_input")
@@ -89,16 +92,18 @@ try:
         deny("tool_input is missing or not a JSON object; the gate cannot judge a write it cannot parse (model-provenance).")
 
     root = posixpath.normpath(os.environ["PG_ROOT"].replace("\\", "/"))
+    root_real = posixpath.normpath(os.path.realpath(root).replace("\\", "/"))
     RECORD_RE = re.compile(r'^docs/issue-[0-9]+/reports/ml-engineering\.md$')
 
     def resolve(p):
-        n = p.replace("\\", "/")
-        a = n if posixpath.isabs(n) else posixpath.join(root, n)
-        a = posixpath.normpath(a)
+        tail = gate_lib.gate_normalize_path(root, p)
+        if tail is None:
+            return None
+        a = root if tail == "" else root + "/" + tail
         try:
             return posixpath.normpath(os.path.realpath(a).replace("\\", "/"))
         except OSError:
-            return a
+            return posixpath.normpath(a)
 
     path = None
     if tool in ("Write", "Edit", "MultiEdit"):
@@ -109,9 +114,9 @@ try:
         sys.exit(0)
 
     r = resolve(path)
-    if not r.startswith(root + "/"):
+    if r is None or not (r == root_real or r.startswith(root_real + "/")):
         sys.exit(0)
-    rel = r[len(root):].lstrip("/")
+    rel = r[len(root_real):].lstrip("/")
     if not RECORD_RE.match(rel):
         sys.exit(0)  # not a model-provenance write surface — not this gate's business
 
@@ -123,29 +128,9 @@ try:
         except OSError:
             deny("%s exists but cannot be read; failing closed on model-provenance." % rel)
 
-    new_text = None
-    if tool == "Write":
-        c = ti.get("content")
-        if isinstance(c, str):
-            new_text = c
-    elif tool == "Edit":
-        o, n = ti.get("old_string"), ti.get("new_string")
-        if isinstance(o, str) and isinstance(n, str) and current is not None and o in current:
-            new_text = current.replace(o, n, 1)
-    elif tool == "MultiEdit":
-        edits = ti.get("edits")
-        text = current
-        if isinstance(edits, list) and text is not None:
-            ok = True
-            for e in edits:
-                if not isinstance(e, dict):
-                    ok = False; break
-                o, n = e.get("old_string"), e.get("new_string")
-                if not isinstance(o, str) or not isinstance(n, str) or o not in text:
-                    ok = False; break
-                text = text.replace(o, n, 1)
-            if ok:
-                new_text = text
+    new_text, ok = gate_lib.gate_reconstruct_write(tool, ti, current)
+    if not ok:
+        new_text = None
 
     if new_text is None:
         deny(
@@ -157,25 +142,48 @@ try:
 
     low = new_text.lower()
 
-    def has_any(*needles):
-        return any(nd in low for nd in needles)
+    def has_any(text, *needles):
+        return any(nd in text for nd in needles)
 
+    _HEADING_RE = re.compile(r'^#+\s*(.+)$', re.M)
+
+    def _sections(text):
+        heads = [(m.start(), m.group(1).strip().lower()) for m in _HEADING_RE.finditer(text)]
+        heads.sort()
+        spans = []
+        for i, (start, name) in enumerate(heads):
+            end = heads[i + 1][0] if i + 1 < len(heads) else len(text)
+            spans.append((name, start, end))
+        return spans
+
+    def _span_text(sections, low_text, *aliases):
+        for name, start, end in sections:
+            if any(a in name for a in aliases):
+                return low_text[start:end]
+        return None
+
+    sections = _sections(low)
     missing = []
 
-    # 1. Model-card section markers (Mitchell et al. 2019).
+    # 1. Model-card section markers (Mitchell et al. 2019) — each field
+    #    must be anchored to a heading matching that field's own name, or
+    #    an explicit "model card" section; a bare mention elsewhere in the
+    #    document no longer satisfies this check.
     for field in ("intended use", "limitations", "training data", "evaluation data"):
-        if field not in low:
+        scope = _span_text(sections, low, field) or _span_text(sections, low, "model card")
+        if scope is None or field not in scope:
             missing.append("model-card:%s" % field)
 
-    # 2. Data version identifier.
-    data_version_hit = has_any("dataset version", "data version") or re.search(
+    # 2. Data version identifier (document-wide — not a section-heading
+    #    concept in the model-card standard, so unchanged).
+    data_version_hit = has_any(low, "dataset version", "data version") or re.search(
         r'dataset[^\n]{0,40}v\d', low
     )
     if not data_version_hit:
         missing.append("data-version")
 
     # 3. Model version identifier (avoid double-counting dataset/data matches).
-    model_version_direct = has_any("model version")
+    model_version_direct = has_any(low, "model version")
     model_version_regex = None
     if not model_version_direct:
         for m in re.finditer(r'model[^\n]{0,40}v\d', low):
@@ -193,8 +201,9 @@ try:
             "Mitchell et al. 2019 (FAT* '19, model cards) and Sculley et al. 2015 (NeurIPS, "
             "hidden technical debt in ML systems), and docs/issue-1/proposals/"
             "ml-engineering-norms.md §b, every ml-engineering phase-2 record must document "
-            "intended use, limitations, training data, and evaluation data, and must carry "
-            "explicit dataset and model version identifiers." % ", ".join(missing)
+            "intended use, limitations, training data, and evaluation data each under its own "
+            "heading (or an explicit model-card section), and must carry explicit dataset and "
+            "model version identifiers." % ", ".join(missing)
         )
 
     sys.exit(0)

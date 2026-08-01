@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-__fc(){ rc=$?; if [ "$rc" != 0 ] && [ "$rc" != 2 ]; then echo "fail-closed: gate aborted (rc=$rc)" >&2; exit 2; fi; }
-trap __fc EXIT
+. "${CLAUDE_PLUGIN_ROOT_CORE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../core" && pwd -P)}/hooks/lib/gate-lib.sh"
+gate_trap_fail_closed
 # PreToolUse gate (Write|Edit|MultiEdit) — ml-engineering-role-specific.
 #
 # Targets: docs/issue-<n>/reports/ml-engineering.md (phase-2 record) — this
@@ -11,21 +11,23 @@ trap __fc EXIT
 # Production Readiness and Technical Debt Reduction", IEEE Big Data) four
 # named rubric sections — Data Tests, Model Tests, ML Infrastructure Tests,
 # Monitoring Tests. Each section that is present must also carry a scored
-# verdict marker (pass/fail/score:/ /10 /verdict) within its own slice of
-# the document, not merely somewhere in the document. Fails closed when a
-# required section is absent entirely, or present but unscored, mirroring
-# the pricing gate's "digits present but no labeling language" pattern.
+# verdict marker (pass/fail/score:/ /10 /verdict, word-boundary matched so
+# "bypass" does not count as "pass") within its own slice of the document,
+# not merely somewhere in the document. Fails closed when a required
+# section is absent entirely, or present but unscored.
+#
+# Sources gate-lib.sh/gate-lib.py (docs/handbooks/gate-house-standard.md,
+# issue-72) for the fail-closed trap, kill switch, JSON parsing, path
+# normalization, and Write/Edit/MultiEdit reconstruction — see that file's
+# usage comment for the exact call convention.
 #
 # Kill switch: export ML_ENGINEERING_ML_TEST_SCORE_GATE_OFF=1
 set -uo pipefail
 
 role="${CLAUDE_ROLE:-ml-engineering}"
-deny() { echo "ml-engineering-ml-test-score: refused — $1" >&2; exit 2; }
+deny() { gate_deny "ml-engineering-ml-test-score" "$1"; }
 
-case "${ML_ENGINEERING_ML_TEST_SCORE_GATE_OFF:-}" in
-  ""|0|false|no|off) ;;
-  *) exit 0 ;;
-esac
+gate_kill_switch_active "${ML_ENGINEERING_ML_TEST_SCORE_GATE_OFF:-}" || { trap - EXIT; exit 0; }
 
 command -v python3 >/dev/null 2>&1 || deny "methodology-gate.sh requires python3, which is not on PATH; denying rather than guessing."
 
@@ -72,18 +74,17 @@ PG_PAYLOAD="$payload" PG_ROOT="$root" \
 python3 <<'PY'
 import sys as _fc_sys  # fail-closed-on-internal-error
 try:
-    import json, os, posixpath, re, sys
+    import importlib.util, json, os, posixpath, re, sys
 
     def deny(m):
         sys.stderr.write("ml-engineering-ml-test-score: refused — %s\n" % m); sys.exit(2)
 
+    _spec = importlib.util.spec_from_file_location("gate_lib", os.environ["GATE_LIB_PY"])
+    gate_lib = importlib.util.module_from_spec(_spec)
+    _spec.loader.exec_module(gate_lib)
+
     raw = os.environ.get("PG_PAYLOAD", "")
-    try:
-        ev = json.loads(raw) if raw else {}
-    except ValueError:
-        deny("the tool-call payload is not valid JSON; the gate cannot judge ML Test Score sections on an unparseable write.")
-    if not isinstance(ev, dict):
-        deny("the tool-call payload is not a JSON object; failing closed on the ML Test Score gate.")
+    ev = gate_lib.gate_parse_json_or_deny(raw, deny)
 
     tool = ev.get("tool_name")
     ti = ev.get("tool_input")
@@ -91,16 +92,18 @@ try:
         deny("tool_input is missing or not a JSON object; the gate cannot judge a write it cannot parse (ML Test Score).")
 
     root = posixpath.normpath(os.environ["PG_ROOT"].replace("\\", "/"))
+    root_real = posixpath.normpath(os.path.realpath(root).replace("\\", "/"))
     RECORD_RE = re.compile(r'^docs/issue-[0-9]+/reports/ml-engineering\.md$')
 
     def resolve(p):
-        n = p.replace("\\", "/")
-        a = n if posixpath.isabs(n) else posixpath.join(root, n)
-        a = posixpath.normpath(a)
+        tail = gate_lib.gate_normalize_path(root, p)
+        if tail is None:
+            return None
+        a = root if tail == "" else root + "/" + tail
         try:
             return posixpath.normpath(os.path.realpath(a).replace("\\", "/"))
         except OSError:
-            return a
+            return posixpath.normpath(a)
 
     path = None
     if tool in ("Write", "Edit", "MultiEdit"):
@@ -111,9 +114,9 @@ try:
         sys.exit(0)
 
     r = resolve(path)
-    if not r.startswith(root + "/"):
+    if r is None or not (r == root_real or r.startswith(root_real + "/")):
         sys.exit(0)
-    rel = r[len(root):].lstrip("/")
+    rel = r[len(root_real):].lstrip("/")
     if not RECORD_RE.match(rel):
         sys.exit(0)  # not the ML Test Score write surface — not this gate's business
 
@@ -125,29 +128,9 @@ try:
         except OSError:
             deny("%s exists but cannot be read; failing closed on the ML Test Score gate." % rel)
 
-    new_text = None
-    if tool == "Write":
-        c = ti.get("content")
-        if isinstance(c, str):
-            new_text = c
-    elif tool == "Edit":
-        o, n = ti.get("old_string"), ti.get("new_string")
-        if isinstance(o, str) and isinstance(n, str) and current is not None and o in current:
-            new_text = current.replace(o, n, 1)
-    elif tool == "MultiEdit":
-        edits = ti.get("edits")
-        text = current
-        if isinstance(edits, list) and text is not None:
-            ok = True
-            for e in edits:
-                if not isinstance(e, dict):
-                    ok = False; break
-                o, n = e.get("old_string"), e.get("new_string")
-                if not isinstance(o, str) or not isinstance(n, str) or o not in text:
-                    ok = False; break
-                text = text.replace(o, n, 1)
-            if ok:
-                new_text = text
+    new_text, ok = gate_lib.gate_reconstruct_write(tool, ti, current)
+    if not ok:
+        new_text = None
 
     if new_text is None:
         deny(
@@ -159,39 +142,42 @@ try:
 
     low = new_text.lower()
 
+    _HEADING_RE = re.compile(r'^#+\s*(.+)$', re.M)
+
+    def _sections(text):
+        heads = [(m.start(), m.group(1).strip().lower()) for m in _HEADING_RE.finditer(text)]
+        heads.sort()
+        spans = []
+        for i, (start, name) in enumerate(heads):
+            end = heads[i + 1][0] if i + 1 < len(heads) else len(text)
+            spans.append((name, start, end))
+        return spans
+
+    def _span_text(sections, low_text, *aliases):
+        for name, start, end in sections:
+            if any(a in name for a in aliases):
+                return low_text[start:end]
+        return None
+
     SECTIONS = [
         ("data tests", ("data tests",)),
         ("model tests", ("model tests",)),
         ("ml infrastructure tests", ("ml infrastructure tests", "infrastructure tests")),
         ("monitoring tests", ("monitoring tests",)),
     ]
-    VERDICT_MARKERS = ("pass", "fail", "score:", "/10", "verdict")
+    # Word-boundary matched — a bare substring "pass" must not match inside
+    # "bypass" (the audit-confirmed false positive).
+    VERDICT_RE = re.compile(r'\b(pass|fail|verdict)\b|score:|/10')
 
-    # Find header positions for each section name that appears, to slice
-    # the document into per-section spans bounded by the next occurring
-    # section header (of any of the four) or end of document.
-    header_positions = []  # (start_index, name)
-    for name, aliases in SECTIONS:
-        for alias in aliases:
-            idx = low.find(alias)
-            if idx != -1:
-                header_positions.append((idx, name))
-                break
-    header_positions.sort()
+    sections = _sections(low)
 
     missing = []
-    present_names = {name for _, name in header_positions}
-    for name, _aliases in SECTIONS:
-        if name not in present_names:
+    for name, aliases in SECTIONS:
+        slice_ = _span_text(sections, low, *aliases)
+        if slice_ is None:
             missing.append("section-missing:%s" % name)
             continue
-        # locate this section's start and the next header's start
-        starts = [i for i, n in header_positions if n == name]
-        start = starts[0]
-        later = [i for i, _n in header_positions if i > start]
-        end = min(later) if later else len(low)
-        slice_ = low[start:end]
-        if not any(marker in slice_ for marker in VERDICT_MARKERS):
+        if not VERDICT_RE.search(slice_):
             missing.append("section-unscored:%s" % name)
 
     if missing:
@@ -203,7 +189,8 @@ try:
             "docs/issue-<n>/reports/ml-engineering.md record must carry all four rubric "
             "sections — Data Tests, Model Tests, ML Infrastructure Tests, Monitoring "
             "Tests — and each present section must carry a scored verdict marker "
-            "(pass/fail/score:/ /10 /verdict) within its own section." % ", ".join(missing)
+            "(pass/fail/score:/ /10 /verdict, word-boundary matched) within its own "
+            "section." % ", ".join(missing)
         )
 
     sys.exit(0)
