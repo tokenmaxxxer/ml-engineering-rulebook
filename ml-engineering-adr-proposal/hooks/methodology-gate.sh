@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-__fc(){ rc=$?; if [ "$rc" != 0 ] && [ "$rc" != 2 ]; then echo "fail-closed: gate aborted (rc=$rc)" >&2; exit 2; fi; }
-trap __fc EXIT
+. "${CLAUDE_PLUGIN_ROOT_CORE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../core" && pwd -P)}/hooks/lib/gate-lib.sh"
+gate_trap_fail_closed
 # PreToolUse gate (Write|Edit|MultiEdit) — ml-engineering ADR-proposal
 # methodology gate.
 #
@@ -9,20 +9,24 @@ trap __fc EXIT
 # docs/issue-1/proposals/ml-engineering-norms.md (a).
 #
 # Requires the ADR section markers (Context/Decision/Rationale/
-# Consequences), at least one named source, and an explicit
-# rejected-alternative statement be present in the proposed content.
-# Fails closed when a required element is absent.
+# Consequences), at least one named source located in the Context or
+# Rationale section, and an explicit rejected-alternative statement
+# located in the Rationale or Consequences section. Fails closed when a
+# required element is absent or present only outside its required
+# section.
+#
+# Sources gate-lib.sh/gate-lib.py (docs/handbooks/gate-house-standard.md,
+# issue-72) for the fail-closed trap, kill switch, JSON parsing, path
+# normalization, and Write/Edit/MultiEdit reconstruction — see that file's
+# usage comment for the exact call convention.
 #
 # Kill switch: export ML_ENGINEERING_ADR_PROPOSAL_GATE_OFF=1
 set -uo pipefail
 
 role="${CLAUDE_ROLE:-ml-engineering}"
-deny() { echo "ml-engineering-adr-proposal: refused — $1" >&2; exit 2; }
+deny() { gate_deny "ml-engineering-adr-proposal" "$1"; }
 
-case "${ML_ENGINEERING_ADR_PROPOSAL_GATE_OFF:-}" in
-  ""|0|false|no|off) ;;
-  *) exit 0 ;;
-esac
+gate_kill_switch_active "${ML_ENGINEERING_ADR_PROPOSAL_GATE_OFF:-}" || { trap - EXIT; exit 0; }
 
 command -v python3 >/dev/null 2>&1 || deny "methodology-gate.sh requires python3, which is not on PATH; denying rather than guessing."
 
@@ -69,18 +73,17 @@ PG_PAYLOAD="$payload" PG_ROOT="$root" \
 python3 <<'PY'
 import sys as _fc_sys  # fail-closed-on-internal-error
 try:
-    import json, os, posixpath, re, sys
+    import importlib.util, json, os, posixpath, re, sys
 
     def deny(m):
         sys.stderr.write("ml-engineering-adr-proposal: refused — %s\n" % m); sys.exit(2)
 
+    _spec = importlib.util.spec_from_file_location("gate_lib", os.environ["GATE_LIB_PY"])
+    gate_lib = importlib.util.module_from_spec(_spec)
+    _spec.loader.exec_module(gate_lib)
+
     raw = os.environ.get("PG_PAYLOAD", "")
-    try:
-        ev = json.loads(raw) if raw else {}
-    except ValueError:
-        deny("the tool-call payload is not valid JSON; the gate cannot judge methodology fields on an unparseable write.")
-    if not isinstance(ev, dict):
-        deny("the tool-call payload is not a JSON object; failing closed on methodology.")
+    ev = gate_lib.gate_parse_json_or_deny(raw, deny)
 
     tool = ev.get("tool_name")
     ti = ev.get("tool_input")
@@ -88,16 +91,18 @@ try:
         deny("tool_input is missing or not a JSON object; the gate cannot judge a write it cannot parse (methodology).")
 
     root = posixpath.normpath(os.environ["PG_ROOT"].replace("\\", "/"))
+    root_real = posixpath.normpath(os.path.realpath(root).replace("\\", "/"))
     PROPOSAL_RE = re.compile(r'^docs/issue-[0-9]+/proposals/.*ml-engineering.*\.md$', re.I)
 
     def resolve(p):
-        n = p.replace("\\", "/")
-        a = n if posixpath.isabs(n) else posixpath.join(root, n)
-        a = posixpath.normpath(a)
+        tail = gate_lib.gate_normalize_path(root, p)
+        if tail is None:
+            return None
+        a = root if tail == "" else root + "/" + tail
         try:
             return posixpath.normpath(os.path.realpath(a).replace("\\", "/"))
         except OSError:
-            return a
+            return posixpath.normpath(a)
 
     path = None
     if tool in ("Write", "Edit", "MultiEdit"):
@@ -108,9 +113,9 @@ try:
         sys.exit(0)
 
     r = resolve(path)
-    if not r.startswith(root + "/"):
+    if r is None or not (r == root_real or r.startswith(root_real + "/")):
         sys.exit(0)
-    rel = r[len(root):].lstrip("/")
+    rel = r[len(root_real):].lstrip("/")
     if not PROPOSAL_RE.match(rel):
         sys.exit(0)  # not an ml-engineering ADR-proposal write surface — not this gate's business
 
@@ -122,29 +127,9 @@ try:
         except OSError:
             deny("%s exists but cannot be read; failing closed on methodology." % rel)
 
-    new_text = None
-    if tool == "Write":
-        c = ti.get("content")
-        if isinstance(c, str):
-            new_text = c
-    elif tool == "Edit":
-        o, n = ti.get("old_string"), ti.get("new_string")
-        if isinstance(o, str) and isinstance(n, str) and current is not None and o in current:
-            new_text = current.replace(o, n, 1)
-    elif tool == "MultiEdit":
-        edits = ti.get("edits")
-        text = current
-        if isinstance(edits, list) and text is not None:
-            ok = True
-            for e in edits:
-                if not isinstance(e, dict):
-                    ok = False; break
-                o, n = e.get("old_string"), e.get("new_string")
-                if not isinstance(o, str) or not isinstance(n, str) or o not in text:
-                    ok = False; break
-                text = text.replace(o, n, 1)
-            if ok:
-                new_text = text
+    new_text, ok = gate_lib.gate_reconstruct_write(tool, ti, current)
+    if not ok:
+        new_text = None
 
     if new_text is None:
         deny(
@@ -156,26 +141,58 @@ try:
 
     low = new_text.lower()
 
-    def has_any(*needles):
-        return any(nd in low for nd in needles)
+    def has_any(text, *needles):
+        return any(nd in text for nd in needles)
+
+    # Section/adjacency-scoped checks (not "mentioned anywhere in the
+    # document"): parse the document into heading spans, then require each
+    # field's marker to occur inside the span whose own heading matches.
+    _HEADING_RE = re.compile(r'^#+\s*(.+)$', re.M)
+
+    def _sections(text):
+        heads = [(m.start(), m.group(1).strip().lower()) for m in _HEADING_RE.finditer(text)]
+        heads.sort()
+        spans = []
+        for i, (start, name) in enumerate(heads):
+            end = heads[i + 1][0] if i + 1 < len(heads) else len(text)
+            spans.append((name, start, end))
+        return spans
+
+    def _span_text(sections, low_text, *aliases):
+        parts = []
+        for name, start, end in sections:
+            if any(a in name for a in aliases):
+                parts.append(low_text[start:end])
+        return "\n".join(parts) if parts else None
+
+    sections = _sections(low)
 
     missing = []
 
     # a. ADR section markers — Context / Decision / Rationale / Consequences
-    #    as heading-like tokens on their own line.
+    #    as heading-like tokens on their own line (already adjacency-correct;
+    #    unchanged).
     for name in ("context", "decision", "rationale", "consequences"):
         pat = re.compile(r'^#+\s*' + name + r'\b', re.I | re.M)
         if not pat.search(new_text):
             missing.append("adr-section:%s" % name)
 
-    # b. At least one named source — a citation-like pattern.
-    has_year_paren = bool(re.search(r'\(.*\d{4}.*\)', new_text))
-    if not (has_year_paren or has_any("source:", "cited")):
+    # b. At least one named source, scoped to the Context or Rationale
+    #    section — a mention anywhere else in the document no longer
+    #    satisfies this check.
+    source_scope = _span_text(sections, low, "context", "rationale")
+    if source_scope is None:
         missing.append("named-source")
+    else:
+        has_year_paren = bool(re.search(r'\(.*\d{4}.*\)', source_scope))
+        if not (has_year_paren or has_any(source_scope, "source:", "cited")):
+            missing.append("named-source")
 
-    # c. An explicitly rejected alternative.
-    if not has_any(
-        "rejected alternative", "rejected:", "considered and declined", "declined because"
+    # c. An explicitly rejected alternative, scoped to the Rationale or
+    #    Consequences section.
+    rejected_scope = _span_text(sections, low, "rationale", "consequences")
+    if rejected_scope is None or not has_any(
+        rejected_scope, "rejected alternative", "rejected:", "considered and declined", "declined because"
     ):
         missing.append("rejected-alternative")
 
@@ -184,8 +201,9 @@ try:
             "ml-engineering ADR-proposal write is missing required element(s): %s. Per "
             "docs/issue-1/proposals/ml-engineering-norms.md §a, every ml-engineering "
             "phase-1 ADR proposal must carry Context/Decision/Rationale/Consequences "
-            "section markers, at least one named source, and an explicit "
-            "rejected-alternative statement." % ", ".join(missing)
+            "section markers, at least one named source within its Context or Rationale "
+            "section, and an explicit rejected-alternative statement within its Rationale "
+            "or Consequences section." % ", ".join(missing)
         )
 
     sys.exit(0)
