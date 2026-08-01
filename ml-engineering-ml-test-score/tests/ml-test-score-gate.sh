@@ -212,6 +212,10 @@ run_raw deny malformed-json-empty     ''
 # --- kill-switch garbage value: gate must stay ACTIVE (still evaluates and denies FAIL_CONTENT) ---
 run_write deny kill-switch-garbage-stays-active "$FAIL_CONTENT" "${GATE_OFF_VAR}=1x"
 
+# --- missing-core: guarded source must deny, not silently allow (issue-75). Uses
+#     PASS_CONTENT (otherwise-allowed) so a deny here is provably the guard, not the content check. ---
+run_write deny missing-core-denies-not-allows "$PASS_CONTENT" "CLAUDE_PLUGIN_ROOT_CORE=/no-such-core-9f3a"
+
 # --- absolute-path / ./-prefixed matching ---
 run_write_abs allow absolute-path-match "$PASS_CONTENT" abs
 run_write_abs allow dotslash-path-match "$PASS_CONTENT" dotslash
